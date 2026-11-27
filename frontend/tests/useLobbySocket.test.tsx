@@ -12,7 +12,7 @@ class FakeSocket {
   onopen: (() => void) | null = null;
   onmessage: ((e: { data: string }) => void) | null = null;
   onclose: ((e: { code: number }) => void) | null = null;
-  constructor(public url: string) {
+  constructor(public url: string, public protocols?: string[]) {
     FakeSocket.instances.push(this);
   }
   send(data: string) {
@@ -39,6 +39,8 @@ beforeEach(() => {
 afterEach(() => {
   vi.useRealTimers();
   vi.unstubAllGlobals();
+  vi.unstubAllEnvs();
+  vi.restoreAllMocks();
 });
 
 describe("useLobbySocket", () => {
@@ -91,6 +93,51 @@ describe("useLobbySocket", () => {
     unmount();
     act(() => void vi.advanceTimersByTime(60_000));
     expect(FakeSocket.instances).toHaveLength(1);
+  });
+});
+
+describe("useLobbySocket with a cross-host API (production)", () => {
+  const ticketResponse = () =>
+    new Response(JSON.stringify({ ticket: "tkt123", expires_in: 30 }), { status: 200, headers: { "Content-Type": "application/json" } });
+
+  it("fetches a single-use ticket and offers it as a subprotocol, never in the URL", async () => {
+    vi.stubEnv("NEXT_PUBLIC_WS_URL", "wss://api.other.example");
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async () => ticketResponse());
+    renderHook(() => useLobbySocket("room-1"), { wrapper });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(fetchSpy).toHaveBeenCalledWith("/api/v1/rooms/room-1/ws-ticket", expect.objectContaining({ method: "POST" }));
+    expect(FakeSocket.instances).toHaveLength(1);
+    expect(FakeSocket.instances[0].url).toBe("wss://api.other.example/ws/rooms/room-1");
+    expect(FakeSocket.instances[0].protocols).toEqual(["huntme.ticket", "tkt123"]);
+  });
+
+  it("gets a fresh ticket on every reconnect", async () => {
+    vi.stubEnv("NEXT_PUBLIC_WS_URL", "wss://api.other.example");
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async () => ticketResponse());
+    renderHook(() => useLobbySocket("room-1"), { wrapper });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    act(() => FakeSocket.instances[0].onclose?.({ code: 1006 }));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    expect(FakeSocket.instances).toHaveLength(2);
+  });
+
+  it("stops retrying when the ticket is refused (not a member / logged out)", async () => {
+    vi.stubEnv("NEXT_PUBLIC_WS_URL", "wss://api.other.example");
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async () => new Response(JSON.stringify({ error: { code: "room_not_found", message: "Room not found." } }), { status: 404 }),
+    );
+    renderHook(() => useLobbySocket("room-1"), { wrapper });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000);
+    });
+    expect(FakeSocket.instances).toHaveLength(0);
   });
 });
 

@@ -1,0 +1,40 @@
+name: Verify production
+
+# Manual smoke test of the live deployment. Run it from the Actions tab after a deploy.
+# Needs two repository VARIABLES (Settings -> Secrets and variables -> Actions -> Variables):
+#   FRONTEND_URL  e.g. https://huntme-frontend.onrender.com
+#   BACKEND_URL   e.g. https://huntme-backend.onrender.com
+# Free Render services sleep, so each request is retried for up to ~3 minutes while they wake.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    env:
+      FRONTEND_URL: ${{ vars.FRONTEND_URL }}
+      BACKEND_URL: ${{ vars.BACKEND_URL }}
+    steps:
+      - name: Require URLs
+        run: |
+          test -n "$FRONTEND_URL" && test -n "$BACKEND_URL" || { echo "Set FRONTEND_URL and BACKEND_URL repository variables"; exit 1; }
+      - name: Backend liveness (/health)
+        run: |
+          curl -fsS --retry 12 --retry-delay 15 --retry-all-errors --max-time 60 "$BACKEND_URL/health"
+      - name: Backend readiness (database, PostGIS, Key Value)
+        run: |
+          body=$(curl -fsS --retry 6 --retry-delay 10 --retry-all-errors --max-time 60 "$BACKEND_URL/health/ready")
+          echo "$body"
+          echo "$body" | grep -q '"status":"ok"'
+      - name: Frontend renders
+        run: |
+          curl -fsS --retry 12 --retry-delay 15 --retry-all-errors --max-time 60 -o /dev/null "$FRONTEND_URL/"
+      - name: Frontend proxy reaches the API (expects 401 JSON, not 5xx)
+        run: |
+          code=$(curl -s -o /tmp/body.json -w '%{http_code}' --retry 6 --retry-delay 10 --retry-all-errors --max-time 60 \
+            "$FRONTEND_URL/api/v1/rooms/00000000-0000-0000-0000-000000000000")
+          echo "HTTP $code"; cat /tmp/body.json; echo
+          test "$code" = "401"

@@ -24,7 +24,14 @@ def create_engine(settings: Settings) -> AsyncEngine:
     if settings.app_env == "test":
         # Each test runs in its own event loop; pooled asyncpg connections can't be shared across loops.
         return create_async_engine(settings.database_url, poolclass=NullPool)
-    return create_async_engine(settings.database_url, pool_pre_ping=True, pool_size=10, max_overflow=10)
+    # pool_pre_ping + pool_recycle: serverless Postgres (Neon) suspends idle computes and drops connections.
+    return create_async_engine(
+        settings.database_url,
+        pool_pre_ping=True,
+        pool_size=settings.db_pool_size,
+        max_overflow=settings.db_max_overflow,
+        pool_recycle=settings.db_pool_recycle_seconds,
+    )
 
 
 def create_sessionmaker(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:

@@ -17,6 +17,8 @@ const nextConfig: NextConfig = {
         headers: [
           { key: "X-Content-Type-Options", value: "nosniff" },
           { key: "X-Frame-Options", value: "DENY" },
+          // Ignored by browsers over plain http (local Docker); enforced on the https production host.
+          { key: "Strict-Transport-Security", value: "max-age=31536000" },
           { key: "Referrer-Policy", value: "strict-origin-when-cross-origin" },
           // Camera + geolocation are needed by later stages; everything else is off.
           { key: "Permissions-Policy", value: "camera=(self), geolocation=(self), microphone=()" },

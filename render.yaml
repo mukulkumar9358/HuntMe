@@ -1,0 +1,85 @@
+# Render Blueprint for HuntMe (all FREE instance types).
+#
+# Before the first sync, check the two public URLs below. Render gives a service the URL
+# https://<service-name>.onrender.com ONLY if that name is free. If "huntme-frontend" / "huntme-backend"
+# are taken, rename the services here (e.g. huntme-mukul-frontend) and update the 4 URL variables to match.
+#
+# Free-tier facts this file is built around (see docs/DEPLOY.md):
+#   * Free web services cannot RECEIVE private-network traffic, so the frontend proxies to the backend's
+#     public https URL. Only the backend -> Key Value link is private.
+#   * preDeployCommand is paid-only, so migrations run in the backend's start command.
+#   * Free Key Value is memory-only and may be wiped on restart (rate limits / presence / pub-sub tolerate that).
+
+services:
+  # ---------------- Backend: FastAPI ----------------
+  - type: web
+    name: huntme-backend
+    runtime: docker
+    plan: free
+    region: singapore            # keep ALL three resources (and ideally Neon) in the same region
+    rootDir: backend
+    dockerfilePath: ./Dockerfile   # relative to rootDir
+    # Migrate, then serve. Safe because a free service never runs more than one instance.
+    dockerCommand: >-
+      sh -c "alembic upgrade head &&
+      exec uvicorn app.main:get_app --factory --host 0.0.0.0 --port $PORT
+      --proxy-headers --forwarded-allow-ips '*'"
+    # Liveness only. /health/ready touches Neon + Key Value; polling it would keep Neon awake and burn its
+    # monthly compute allowance. Check /health/ready manually after deploys.
+    healthCheckPath: /health
+    autoDeployTrigger: checksPass  # deploy only after the GitHub Actions checks on `main` pass
+    envVars:
+      - key: PORT
+        value: "8000"
+      - key: APP_ENV
+        value: production
+      - key: APP_DEBUG
+        value: "false"
+      - key: FRONTEND_URL        # exact browser origin of the frontend (used for Origin checks + CORS)
+        value: https://huntme-frontend.onrender.com
+      - key: BACKEND_URL
+        value: https://huntme-backend.onrender.com
+      - key: DATABASE_URL        # Neon DIRECT connection string. Secret: you paste it in the Render dashboard.
+        sync: false
+      - key: REDIS_URL           # private-network URL of the Key Value instance below
+        fromService:
+          type: keyvalue
+          name: huntme-keyvalue
+          property: connectionString
+      - key: JWT_SECRET          # Render generates a random value; never committed
+        generateValue: true
+      - key: TRUST_PROXY_HEADERS
+        value: "true"
+      - key: TRUSTED_PROXY_HOPS  # see docs/DEPLOY.md "Client IP / proxy hops" before changing
+        value: "2"
+      - key: DB_POOL_SIZE
+        value: "5"
+      - key: DB_MAX_OVERFLOW
+        value: "2"
+
+  # ---------------- Frontend: Next.js ----------------
+  - type: web
+    name: huntme-frontend
+    runtime: docker
+    plan: free
+    region: singapore
+    rootDir: frontend
+    dockerfilePath: ./Dockerfile   # relative to rootDir
+    healthCheckPath: /
+    autoDeployTrigger: checksPass
+    envVars:
+      - key: PORT
+        value: "2005"
+      # Baked into the Next.js build (Dockerfile ARGs). Changing either requires a redeploy.
+      - key: BACKEND_INTERNAL_URL   # server-side rewrite target: the backend's PUBLIC https URL (free tier)
+        value: https://huntme-backend.onrender.com
+      - key: NEXT_PUBLIC_WS_URL     # what the BROWSER connects to for WebSockets
+        value: wss://huntme-backend.onrender.com
+
+  # ---------------- Key Value (Redis-compatible) ----------------
+  - type: keyvalue
+    name: huntme-keyvalue
+    plan: free
+    region: singapore
+    maxmemoryPolicy: allkeys-lru
+    ipAllowList: []               # [] = reachable only over Render's private network, never from the internet

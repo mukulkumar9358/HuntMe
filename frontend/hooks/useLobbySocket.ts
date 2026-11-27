@@ -4,6 +4,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 
 import { roomKey } from "@/hooks/useRooms";
+import { ApiError, api } from "@/services/api";
 
 const PING_MS = 15_000;
 const MAX_BACKOFF_MS = 15_000;
@@ -24,6 +25,23 @@ export function lobbySocketUrl(roomId: string): string {
   return `${base.replace(/\/$/, "")}/ws/rooms/${roomId}`;
 }
 
+/**
+ * True when the socket host differs from the page host (production: frontend and API live on different
+ * hostnames), so the browser won't send our auth cookies to it. In that case we authenticate with a
+ * single-use ticket minted through the same-origin API. Locally (same hostname) the cookie path is used.
+ */
+function needsTicket(): boolean {
+  const configured = process.env.NEXT_PUBLIC_WS_URL;
+  if (!configured) return false;
+  try {
+    return new URL(configured).hostname !== window.location.hostname;
+  } catch {
+    return false;
+  }
+}
+
+const TICKET_SUBPROTOCOL = "huntme.ticket";
+
 /** Keeps a lobby socket open. Returns whether it's connected; while it isn't, callers should poll. */
 export function useLobbySocket(roomId: string, enabled = true): { connected: boolean } {
   const qc = useQueryClient();
@@ -37,8 +55,14 @@ export function useLobbySocket(roomId: string, enabled = true): { connected: boo
     let attempt = 0;
     let disposed = false;
 
-    const connect = () => {
-      socket = new WebSocket(lobbySocketUrl(roomId));
+    // Function declarations (hoisted) so these can reference each other regardless of order.
+    function scheduleRetry() {
+      retryTimer = setTimeout(connect, Math.min(1000 * 2 ** attempt++, MAX_BACKOFF_MS));
+    }
+
+    function open(protocols?: string[]) {
+      const url = lobbySocketUrl(roomId);
+      socket = protocols ? new WebSocket(url, protocols) : new WebSocket(url);
       socket.onopen = () => {
         attempt = 0;
         setConnected(true);
@@ -59,9 +83,29 @@ export function useLobbySocket(roomId: string, enabled = true): { connected: boo
         if (disposed) return;
         void qc.invalidateQueries({ queryKey: roomKey(roomId) }); // e.g. removed from the room -> 404 -> UI reacts
         if (FATAL_CLOSE_CODES.has(event.code)) return;
-        retryTimer = setTimeout(connect, Math.min(1000 * 2 ** attempt++, MAX_BACKOFF_MS));
+        scheduleRetry();
       };
-    };
+    }
+
+    // A fresh ticket is fetched for every (re)connect: tickets are single-use and expire in seconds.
+    async function connectWithTicket() {
+      try {
+        const { ticket } = await api<{ ticket: string }>(`/rooms/${roomId}/ws-ticket`, { method: "POST" });
+        if (!disposed) open([TICKET_SUBPROTOCOL, ticket]);
+      } catch (err) {
+        if (disposed) return;
+        if (err instanceof ApiError && [401, 403, 404].includes(err.status)) {
+          void qc.invalidateQueries({ queryKey: roomKey(roomId) }); // logged out / removed: let the UI react, don't retry
+          return;
+        }
+        scheduleRetry(); // network blip or API waking from sleep
+      }
+    }
+
+    function connect() {
+      if (needsTicket()) void connectWithTicket();
+      else open();
+    }
 
     connect();
     return () => {
