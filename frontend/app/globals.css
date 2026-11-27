@@ -1,0 +1,44 @@
+@import "tailwindcss";
+
+@theme {
+  --color-ink: #080d19;
+  --color-panel: #111827;
+  --color-panel-raised: #172033;
+  --color-line: #243049;
+  --color-blue: #3b82f6;
+  --color-blue-soft: #93c5fd;
+  --color-red: #ef4444;
+  --color-green: #22c55e;
+  --color-amber: #f59e0b;
+  --color-text: #f8fafc;
+  --color-muted: #94a3b8;
+  --font-display: "Bricolage Grotesque Variable", ui-sans-serif, system-ui, sans-serif;
+  --font-sans: "Hanken Grotesk Variable", ui-sans-serif, system-ui, sans-serif;
+}
+
+html {
+  color-scheme: dark;
+  background: var(--color-ink);
+}
+
+body {
+  background: var(--color-ink);
+  color: var(--color-text);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+:focus-visible {
+  outline: 2px solid var(--color-blue-soft);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+@keyframes radar-sweep {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .radar-sweep { animation: none !important; }
+}

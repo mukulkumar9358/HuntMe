@@ -1,0 +1,71 @@
+name: huntme
+
+services:
+  huntme-db:
+    image: postgis/postgis:16-3.4
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-huntme}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-huntme}
+    volumes:
+      - huntme-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    # No published ports: reachable only from other services on the compose network.
+
+  huntme-redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - huntme-redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  huntme-backend:
+    build: ./backend
+    restart: unless-stopped
+    depends_on:
+      huntme-db:
+        condition: service_healthy
+      huntme-redis:
+        condition: service_healthy
+    environment:
+      APP_ENV: ${APP_ENV:-development}
+      APP_DEBUG: ${APP_DEBUG:-false}
+      FRONTEND_URL: ${FRONTEND_URL:-http://localhost:3000}
+      BACKEND_URL: ${BACKEND_URL:-http://localhost:8000}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-huntme}:${POSTGRES_PASSWORD}@huntme-db:5432/${POSTGRES_DB:-huntme}
+      REDIS_URL: redis://huntme-redis:6379/0
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in .env (32+ random characters)}
+      JWT_ACCESS_TOKEN_EXPIRE_MINUTES: ${JWT_ACCESS_TOKEN_EXPIRE_MINUTES:-15}
+      # The Next.js container is the single trusted proxy in front of the API.
+      TRUST_PROXY_HEADERS: "true"
+      TRUSTED_PROXY_HOPS: ${TRUSTED_PROXY_HOPS:-1}
+    # Migrate, then serve. With more than one backend replica, run migrations as a separate deploy step instead.
+    command: ["sh", "-c", "alembic upgrade head && exec uvicorn app.main:get_app --factory --host 0.0.0.0 --port 8000 --proxy-headers --forwarded-allow-ips '*'"]
+    ports:
+      - "127.0.0.1:8000:8000"
+
+  huntme-frontend:
+    build:
+      context: ./frontend
+      args:
+        BACKEND_INTERNAL_URL: http://huntme-backend:8000
+        NEXT_PUBLIC_WS_URL: ${NEXT_PUBLIC_WS_URL:-ws://localhost:8000}
+    restart: unless-stopped
+    depends_on:
+      huntme-backend:
+        condition: service_healthy
+    ports:
+      - "2005:3000"
+volumes:
+  huntme-db-data:
+  huntme-redis-data:
