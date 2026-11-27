@@ -1,21 +1,27 @@
+import logging
 import uuid
 
 from fastapi import APIRouter, Depends, Request, Response
 from redis.asyncio import Redis
+from redis.exceptions import RedisError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
 from app.core.dependencies import (
     check_rate_limit, client_ip, get_current_user, get_db, get_redis, get_settings_dep, require_csrf,
 )
+from app.core.errors import AppError
 from app.infrastructure import presence
 from app.infrastructure.realtime import notify_room_changed
+from app.infrastructure.ws_ticket import issue_ticket
 from app.models.user import User
+from app.repositories.room_repository import RoomRepository
 from app.schemas.rooms import (
     InviteOut, JoinRequest, MemberOut, MemberUpdate, RoomCreate, RoomCreated, RoomDetail, TeamAssign,
 )
 from app.services.room_service import RoomService
 
+logger = logging.getLogger("huntme.rooms")
 router = APIRouter(prefix="/rooms", tags=["rooms"])
 
 
@@ -59,6 +65,30 @@ async def join_room(
     room = await svc.join(user, body.room_code, body.invite_token)
     await notify_room_changed(redis, room.id)
     return await _detail(svc, redis, room.id, user)
+
+
+@router.post("/{room_id}/ws-ticket", dependencies=[Depends(require_csrf)])
+async def issue_socket_ticket(
+    room_id: uuid.UUID,
+    request: Request,
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db),
+    redis: Redis = Depends(get_redis),
+    settings: Settings = Depends(get_settings_dep),
+) -> dict[str, object]:
+    """Mint a single-use ticket for the lobby WebSocket (direct browser -> API connections)."""
+    await check_rate_limit(
+        redis, "ws_ticket", f"{user.id}:{client_ip(request, settings)}",
+        settings.ws_ticket_rate_limit_attempts, settings.room_rate_limit_window_seconds,
+    )
+    if await RoomRepository(session).active_member_by_user(room_id, user.id) is None:
+        raise AppError(404, "room_not_found", "Room not found.")
+    try:
+        ticket = await issue_ticket(redis, user.id, room_id, settings.ws_ticket_ttl_seconds)
+    except RedisError:
+        logger.error("ws_ticket_redis_unavailable")
+        raise AppError(503, "realtime_unavailable", "Live updates are temporarily unavailable.") from None
+    return {"ticket": ticket, "expires_in": settings.ws_ticket_ttl_seconds}
 
 
 @router.get("/{room_id}", response_model=RoomDetail)

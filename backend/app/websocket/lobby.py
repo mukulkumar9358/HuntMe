@@ -1,7 +1,7 @@
 """Lobby WebSocket: /ws/rooms/{room_id}.
 
-Auth is the same HttpOnly access-token cookie as REST, checked at the handshake together with the Origin header
-and active room membership. The socket only carries content-free "room:updated" signals plus presence
+Auth is either a single-use ticket (production, cross-host) or the HttpOnly access-token cookie (same host), checked
+at the handshake together with the Origin header and active room membership. The socket only carries content-free "room:updated" signals plus presence
 heartbeats; clients refetch real data over authorised REST.
 """
 
@@ -18,6 +18,7 @@ from app.core.dependencies import ACCESS_COOKIE
 from app.core.security import decode_access_token
 from app.infrastructure import presence
 from app.infrastructure.realtime import notify_room_changed, room_channel
+from app.infrastructure.ws_ticket import SUBPROTOCOL, consume_ticket, ticket_from_subprotocols
 from app.repositories.room_repository import RoomRepository
 from app.repositories.user_repository import UserRepository
 
@@ -43,8 +44,26 @@ async def lobby_socket(websocket: WebSocket, room_id: uuid.UUID) -> None:
         await websocket.close(code=CLOSE_FORBIDDEN)
         return
 
-    token = websocket.cookies.get(ACCESS_COOKIE)
-    user_id = decode_access_token(token, settings) if token else None
+    # Production: the browser connects straight to this host, so it presents a single-use ticket (minted via the
+    # same-origin REST API) in the Sec-WebSocket-Protocol header. Local Docker (same host) still works with the
+    # access-token cookie. Either way the user must be an active member of this room.
+    subprotocol: str | None = None
+    ticket = ticket_from_subprotocols(websocket.scope.get("subprotocols", []))
+    if ticket is not None:
+        subprotocol = SUBPROTOCOL
+        try:
+            consumed = await consume_ticket(redis, ticket)
+        except RedisError:
+            logger.error("ws_ticket_redis_unavailable")
+            await websocket.close(code=1011)
+            return
+        if consumed is None or consumed[1] != room_id:
+            await websocket.close(code=CLOSE_UNAUTHORIZED)
+            return
+        user_id: uuid.UUID | None = consumed[0]
+    else:
+        token = websocket.cookies.get(ACCESS_COOKIE)
+        user_id = decode_access_token(token, settings) if token else None
     if user_id is None:
         await websocket.close(code=CLOSE_UNAUTHORIZED)
         return
@@ -59,7 +78,7 @@ async def lobby_socket(websocket: WebSocket, room_id: uuid.UUID) -> None:
         await websocket.close(code=CLOSE_FORBIDDEN)
         return
 
-    await websocket.accept()
+    await websocket.accept(subprotocol=subprotocol)
     pubsub = redis.pubsub()
     ttl = settings.presence_ttl_seconds
     try:
