@@ -26,10 +26,10 @@ jobs:
         env:
           POSTGRES_USER: huntme
           POSTGRES_PASSWORD: huntme_dev_pw
-          POSTGRES_DB: huntme_test
+          POSTGRES_DB: postgres
         ports: ["5432:5432"]
         options: >-
-          --health-cmd "pg_isready -U huntme -d huntme_test"
+          --health-cmd "pg_isready -U huntme -d postgres"
           --health-interval 5s --health-timeout 5s --health-retries 10
       redis:
         image: redis:7-alpine
@@ -56,6 +56,11 @@ jobs:
         run: |
           pip install -r requirements-dev.txt
           pip install ruff
+
+      - name: Create clean test database
+        run: createdb --host localhost --username huntme huntme_test
+        env:
+    PGPASSWORD: huntme_dev_pw
       - name: Lint (syntax errors and undefined names)
         run: ruff check --select E9,F63,F7,F82 .
       - name: Tests (builds the schema from the real Alembic migrations)
